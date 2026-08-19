@@ -1,0 +1,39 @@
+{
+  "name": "eggsy-amino",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && node scripts/copy-face-models.mjs",
+    "preview": "vite preview",
+    "postinstall": "node scripts/copy-face-models.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "cap:add:android": "cap add android && node scripts/patch-android-manifest.mjs && node scripts/patch-android-version.mjs && node scripts/generate-icons.mjs && node scripts/patch-android-signing.mjs && cap sync android",
+    "cap:sync": "cap sync android",
+    "cap:open:android": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/app": "^6.0.3",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/device": "^6.0.3",
+    "@capacitor/filesystem": "^6.0.4",
+    "@capacitor/geolocation": "^6.1.1",
+    "@vladmandic/human": "3.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.45",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2"
+  }
+}

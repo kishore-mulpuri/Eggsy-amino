@@ -1,0 +1,12 @@
+node_modules/
+dist/
+android/
+.DS_Store
+*.log
+*.apk
+*.aab
+public/models/
+.claude/
+*.tsbuildinfo
+*.keystore
+!debug.keystore

@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  background-color: #faf8f7;
+  color: #131313;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+@layer components {
+  .card {
+    @apply bg-surface rounded-2xl border border-line shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl font-medium transition-colors disabled:opacity-40 disabled:pointer-events-none select-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary text-white active:bg-primary-dark;
+  }
+
+  .btn-outline {
+    @apply btn border border-line bg-surface text-ink active:bg-bg;
+  }
+
+  .btn-brand-outline {
+    @apply btn border border-primary text-primary bg-surface active:bg-primary/5;
+  }
+
+  .btn-accent {
+    @apply btn bg-accent text-ink active:brightness-95;
+  }
+
+  .btn-danger {
+    @apply btn border border-primary/30 text-primary bg-surface active:bg-primary/5;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-line bg-input px-3.5 py-2.5 text-[15px] text-ink placeholder:text-ink-muted/70 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary;
+  }
+
+  .label {
+    @apply block text-[13px] font-medium text-ink-muted mb-1;
+  }
+
+  .section-title {
+    @apply text-[13px] font-semibold uppercase tracking-wide text-ink-muted;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold;
+  }
+}
+
+/* Kill the spinners/autofill styling on PIN inputs */
+input[type="password"]::-webkit-outer-spin-button,
+input[type="password"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d6d1cf;
+  border-radius: 9999px;
+}

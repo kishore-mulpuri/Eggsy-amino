@@ -1,0 +1,69 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Fast gate: typecheck + bundle the web app. No Android SDK needed.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build web
+        run: npm run build
+
+  # Full Android build: generates the native project, patches it, and
+  # assembles a signed debug APK. versionCode = github.run_number so every
+  # build is a strictly higher version than the last (this is what makes
+  # Android accept it as an update over the previous install). Signed with
+  # the repo's committed debug.keystore, so the key never changes either.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web
+        run: npm run build
+
+      # cap add android + manifest/version/signing/icon patches + cap sync.
+      # patch-android-version.mjs reads APP_VERSION_CODE, so it lands in
+      # build.gradle as the versionCode the updater relies on.
+      - name: Add Android platform and patch
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+        run: npm run cap:add:android
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: eggsy-amino-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
