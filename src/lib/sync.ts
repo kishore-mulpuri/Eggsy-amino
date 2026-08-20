@@ -87,10 +87,21 @@ function isOffline(): boolean {
 export async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // A caller's own signal (the Cancel button on the first-sync overlay) is
+  // chained into ours rather than replacing it: the request must still die
+  // on the timeout even when nobody presses Cancel, and die immediately when
+  // somebody does.
+  const external = init?.signal ?? null;
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onExternalAbort);
+  }
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (external) external.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -98,11 +109,34 @@ export async function fetchWithTimeout(url: string, init?: RequestInit, timeoutM
  * unchanged (with a timeout — see fetchWithTimeout) except that any 401 is
  * surfaced as a DeviceRevokedError (see the class comment for why every 401
  * qualifies). Callers still check `!res.ok` for everything else. */
-async function authedFetch(serverUrl: string, token: string, path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetchWithTimeout(`${apiBase(serverUrl)}${path}`, {
-    ...init,
-    headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
-  });
+async function authedFetch(
+  serverUrl: string,
+  token: string,
+  path: string,
+  init?: RequestInit,
+  timeoutMs?: number,
+): Promise<Response> {
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${apiBase(serverUrl)}${path}`,
+      {
+        ...init,
+        // Every authenticated request made during the pairing first sync is
+        // cancellable. Outside that window firstSyncSignal() is null and this
+        // is exactly the request it always was.
+        signal: init?.signal ?? firstSyncSignal() ?? undefined,
+        headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
+      },
+      timeoutMs,
+    );
+  } catch (err) {
+    // An abort raised while the operator is cancelling is a cancellation,
+    // not a network failure — the difference decides whether the phone
+    // shows "Stopped" or a red error it never earned.
+    if (firstSyncCancelled) throw new SyncCancelledError();
+    throw err;
+  }
   if (res.status === 401) throw new DeviceRevokedError();
   return res;
 }
@@ -246,7 +280,7 @@ export async function getVersionInfo(): Promise<VersionInfoView> {
  * reason codes, sync cadence, version gates, retention knobs. Small — a few
  * KB — so it can ride a "every few minutes" cadence without hurting. */
 async function pullConfig(serverUrl: string, token: string): Promise<void> {
-  emitProgress(98, "Loading settings…");
+  emitProgress(10, "Loading settings…");
   const res = await authedFetch(serverUrl, token, "/api/device/config");
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -310,6 +344,31 @@ async function setCursor(key: string, cursor: string): Promise<void> {
   await put<CursorMeta>("meta", { key, cursor });
 }
 
+// One page of roster per request. The whole-roster-in-one-response shape
+// this replaced is what hung a phone at 12% for five minutes on a weak link:
+// a megabytes-long JSON body arrives all at once, and unpacking it blocks
+// the single JS thread hard enough that even the abort timer above cannot
+// fire, so the 20s timeout never fought back. Small pages keep every
+// response cheap to hold and cheap to parse, and make each one independently
+// resumable.
+const PEOPLE_PAGE_SIZE = 200;
+
+// A stop, not a pace-setter: at 200 rows a page this covers 100k people. It
+// exists so a server that always answers `hasMore: true` cannot spin here.
+const MAX_PEOPLE_PAGES = 500;
+
+// The roster page gets a longer leash than the 20s every other channel uses.
+// A page is small, but "small" over a rural 2G link still is not 20 seconds,
+// and a timeout the honest case cannot meet is just a sync that never
+// succeeds. Cancel is the operator's escape hatch, not the clock.
+const ROSTER_TIMEOUT_MS = 90_000;
+
+// Roster download dominates the first sync: map rows 20% → 95%. Config and
+// the device role come BEFORE this now (see syncNow), so by the time the bar
+// reaches 20 the phone already knows who it is.
+const PEOPLE_START = 20;
+const PEOPLE_END = 95;
+
 /** Identity: /api/device/pull/people?since=<cursor>. Names and descriptors.
  * Carries NO photos, and — per contract §5.3 — NO state either: the
  * response has no lastPunch/presentToday/servedToday fields, so this must
@@ -318,86 +377,124 @@ async function setCursor(key: string, cursor: string): Promise<void> {
  * those. A quiet call returns zero rows; the cursor is treated as opaque —
  * never parsed (UNIFIED-00 §2). */
 export async function pullPeople(serverUrl: string, token: string, depth = 0): Promise<number> {
-  // The roster is the one channel big enough to matter for a progress bar.
-  // The fetch itself has no streaming progress (one JSON response), so the
-  // "download" phase shows an indeterminate mark, then the bar tracks rows
-  // written / total once the response is parsed.
-  emitProgress(12, "Downloading roster…");
-  const cursor = await getCursor("people-cursor");
-  const url = cursor ? `/api/device/pull/people?since=${encodeURIComponent(cursor)}` : "/api/device/pull/people";
-  const res = await authedFetch(serverUrl, token, url);
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`People pull responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
-  const body = await res.json();
+  emitProgress(20, "Downloading roster…");
 
-  // Depth guard: a correct server says this once; a broken one could say it
-  // forever. Allow exactly one retry, then fail loudly rather than loop.
-  if (body?.fullResyncRequired) {
-    if (depth >= 1) throw new Error("Server keeps requesting a full resync — giving up.");
-    await clear("people");
-    await del("meta", "people-cursor");
-    return pullPeople(serverUrl, token, depth + 1);
-  }
+  let total = 0;
+  let page = 0;
+  let lastCursor = await getCursor("people-cursor");
 
-  const rows: any[] = Array.isArray(body?.people) ? body.people : [];
-  const total = rows.length;
-  const pulledAt = Date.now();
-  // Roster download dominates the first sync: map rows 12% → 95%.
-  const PEOPLE_START = 12;
-  const PEOPLE_END = 95;
-  for (let i = 0; i < rows.length; i++) {
-    const p = rows[i];
-    const existing = await get<Person>("people", p.id);
-    // A local row that is a locally-enrolled wage worker carries fields the
-    // pull can never overwrite (aadhar/role). Merge rather than replace.
-    // lastPunch/presentToday/servedToday/stateAt are preserved from the
-    // existing row (or defaulted for a new one) — deliberately not read
-    // from the response, which never carries them.
-    await put<Person>("people", {
-      ...(existing ?? {}),
-      id: p.id,
-      kind: p.kind,
-      name: p.name,
-      empCode: p.empCode ?? null,
-      descriptor: Array.isArray(p.descriptor) ? Float32Array.from(p.descriptor) : null,
-      recentEmbeddings: Array.isArray(p.recentEmbeddings)
-        ? p.recentEmbeddings.filter((e: any) => Array.isArray(e)).map((e: number[]) => Float32Array.from(e))
-        : [],
-      photoHash: p.photoHash ?? null,
-      thumb: null, // fetched lazily from the thumbs store, never inline in a pull
-      eligibility: {
-        breakfast: !!p.eligibility?.breakfast,
-        lunch: true, // lunch needs no list — present → lunch (UNIFIED-00 §7.7)
-        dinner: !!p.eligibility?.dinner,
-      },
-      lastPunch: existing?.lastPunch ?? null,
-      presentToday: existing?.presentToday ?? false,
-      servedToday: existing?.servedToday ?? [],
-      stateAt: existing?.stateAt,
-      isActive: p.isActive !== false,
-      cachedAt: pulledAt,
-    });
-    if (total > 0) {
+  // Pages, not one giant response — see PEOPLE_PAGE_SIZE. A server that does
+  // not paginate answers the first request with the whole roster and no
+  // `hasMore`, which ends the loop after one pass: exactly the old
+  // behaviour, no version check anywhere.
+  for (;;) {
+    throwIfCancelled();
+    if (page >= MAX_PEOPLE_PAGES) {
+      throw new Error("Roster pull exceeded the page limit — giving up.");
+    }
+
+    const params = new URLSearchParams();
+    if (lastCursor) params.set("since", lastCursor);
+    params.set("limit", String(PEOPLE_PAGE_SIZE));
+    const res = await authedFetch(
+      serverUrl,
+      token,
+      `/api/device/pull/people?${params.toString()}`,
+      undefined,
+      ROSTER_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`People pull responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    }
+    const body = await res.json();
+    throwIfCancelled();
+
+    // Depth guard: a correct server says this once; a broken one could say it
+    // forever. Allow exactly one retry, then fail loudly rather than loop.
+    if (body?.fullResyncRequired) {
+      if (depth >= 1) throw new Error("Server keeps requesting a full resync — giving up.");
+      await clear("people");
+      await del("meta", "people-cursor");
+      return pullPeople(serverUrl, token, depth + 1);
+    }
+
+    const rows: any[] = Array.isArray(body?.people) ? body.people : [];
+    // A paginating server reports how many rows are still outstanding as of
+    // this request, counting this page — so the whole-pull total is what has
+    // already been written plus that. Without it, this page is all there is
+    // and its own length completes the total.
+    const grandTotal = typeof body?.totalPending === "number" && body.totalPending > 0
+      ? total + body.totalPending
+      : total + rows.length;
+    const pulledAt = Date.now();
+
+    for (let i = 0; i < rows.length; i++) {
+      throwIfCancelled();
+      const p = rows[i];
+      const existing = await get<Person>("people", p.id);
+      // A local row that is a locally-enrolled wage worker carries fields the
+      // pull can never overwrite (aadhar/role). Merge rather than replace.
+      // lastPunch/presentToday/servedToday/stateAt are preserved from the
+      // existing row (or defaulted for a new one) — deliberately not read
+      // from the response, which never carries them.
+      await put<Person>("people", {
+        ...(existing ?? {}),
+        id: p.id,
+        kind: p.kind,
+        name: p.name,
+        empCode: p.empCode ?? null,
+        descriptor: Array.isArray(p.descriptor) ? Float32Array.from(p.descriptor) : null,
+        recentEmbeddings: Array.isArray(p.recentEmbeddings)
+          ? p.recentEmbeddings.filter((e: any) => Array.isArray(e)).map((e: number[]) => Float32Array.from(e))
+          : [],
+        photoHash: p.photoHash ?? null,
+        thumb: null, // fetched lazily from the thumbs store, never inline in a pull
+        eligibility: {
+          breakfast: !!p.eligibility?.breakfast,
+          lunch: true, // lunch needs no list — present → lunch (UNIFIED-00 §7.7)
+          dinner: !!p.eligibility?.dinner,
+        },
+        lastPunch: existing?.lastPunch ?? null,
+        presentToday: existing?.presentToday ?? false,
+        servedToday: existing?.servedToday ?? [],
+        stateAt: existing?.stateAt,
+        isActive: p.isActive !== false,
+        cachedAt: pulledAt,
+      });
+      const done = total + i + 1;
       emitProgress(
-        Math.round(PEOPLE_START + ((i + 1) / total) * (PEOPLE_END - PEOPLE_START)),
-        `Downloading roster… ${i + 1} of ${total}`,
+        Math.round(PEOPLE_START + (done / Math.max(done, grandTotal)) * (PEOPLE_END - PEOPLE_START)),
+        `Downloading roster… ${done} of ${Math.max(done, grandTotal)}`,
       );
     }
+
+    const deleted: string[] = Array.isArray(body?.deleted) ? body.deleted : [];
+    await Promise.all(deleted.map((id) => Promise.all([del("people", id), del("thumbs", id)])));
+
+    total += rows.length;
+    page++;
+
+    // The cursor is written per page, not once at the end: that is what makes
+    // a cancelled or dropped pull resumable instead of throwing away
+    // everything it just downloaded. Treated as opaque — never parsed
+    // (UNIFIED-00 §2).
+    const nextCursor = typeof body?.cursor === "string" ? body.cursor : null;
+    if (nextCursor) await setCursor("people-cursor", nextCursor);
+
+    if (body?.hasMore !== true) break;
+    // A server claiming "more" without moving the cursor forward would spin
+    // this loop forever on the same page — stop instead.
+    if (!nextCursor || nextCursor === lastCursor) break;
+    lastCursor = nextCursor;
   }
 
-  if (total === 0) emitProgress(PEOPLE_END, "Roster up to date");
-  emitProgress(PEOPLE_END, total > 0 ? `Roster downloaded (${total})` : "Roster ready");
+  emitProgress(PEOPLE_END, total > 0 ? `Roster downloaded (${total})` : "Roster up to date");
 
-  const deleted: string[] = Array.isArray(body?.deleted) ? body.deleted : [];
-  await Promise.all(deleted.map((id) => Promise.all([del("people", id), del("thumbs", id)])));
-
-  if (typeof body?.cursor === "string") await setCursor("people-cursor", body.cursor);
   // State entries for ids that only just became known — apply them now that
   // the rows exist.
   await applyPendingStateMerges();
-  return rows.length;
+  return total;
 }
 
 interface StateChangedEntry {
@@ -415,7 +512,7 @@ interface StateChangedEntry {
  * counter right now — UNIFIED-00 §5.4). State for unknown ids is parked in
  * meta and applied when the identity pull creates the row. */
 export async function pullState(serverUrl: string, token: string): Promise<{ unknownIds: string[]; changed: number }> {
-  emitProgress(10, "Syncing today's attendance…");
+  emitProgress(16, "Syncing today's attendance…");
   const cursor = await getCursor("state-cursor");
   const url = cursor ? `/api/device/pull/state?since=${encodeURIComponent(cursor)}` : "/api/device/pull/state";
   const res = await authedFetch(serverUrl, token, url);
@@ -745,13 +842,74 @@ function emitProgress(pct: number, label: string): void {
 /** Turn on progress reporting and mark the start of the pairing first sync. */
 export function beginSyncProgress(): void {
   progressReporting = true;
+  firstSyncAbort = new AbortController();
+  firstSyncCancelled = false;
   emitProgress(0, "Preparing…");
 }
 
 /** Mark the end of the pairing first sync and turn reporting back off. */
 export function endSyncProgress(): void {
-  emitProgress(100, "Done");
+  emitProgress(100, firstSyncCancelled ? "Stopped" : "Done");
   progressReporting = false;
+  firstSyncAbort = null;
+}
+
+// ── Cancelling the first sync ───────────────────────────────────────────────
+// The roster pull is the one step slow enough that an operator standing at
+// the gate on a weak signal may reasonably want out of it. Cancelling is
+// safe and loses nothing permanent: the token is already stored, every page
+// of roster already written stays written (see the per-page cursor in
+// pullPeople), and the next scheduled tick picks up exactly where this left
+// off. What it buys is a usable phone NOW instead of a dialog.
+
+/** Set once the operator presses Cancel, so the steps between fetches can
+ * bail out too — aborting the in-flight request alone would just let the
+ * next one start. */
+let firstSyncCancelled = false;
+let firstSyncAbort: AbortController | null = null;
+
+/** Thrown when the operator cancelled. Distinct from a network failure so
+ * syncNow can record "Stopped" rather than a scary error. */
+export class SyncCancelledError extends Error {
+  constructor() {
+    super("Sync cancelled");
+    this.name = "SyncCancelledError";
+  }
+}
+
+/** The signal every authenticated request rides during the first sync, or
+ * null outside that window. */
+function firstSyncSignal(): AbortSignal | null {
+  return firstSyncAbort?.signal ?? null;
+}
+
+/** True once Cancel has been pressed for the current first sync. */
+export function isFirstSyncCancelled(): boolean {
+  return firstSyncCancelled;
+}
+
+/** Whether a cancellable first sync is running right now — the overlay uses
+ * this to decide whether to offer the button at all. */
+export function isFirstSyncRunning(): boolean {
+  return progressReporting && firstSyncAbort !== null;
+}
+
+/** Operator pressed Cancel. Kills the in-flight request immediately and
+ * tells every remaining step to stand down. Never throws. */
+export function cancelFirstSync(): void {
+  if (!progressReporting) return;
+  firstSyncCancelled = true;
+  emitProgress(100, "Stopping…");
+  try {
+    firstSyncAbort?.abort();
+  } catch {
+    // an already-aborted controller is not an error worth surfacing
+  }
+}
+
+/** Bail out of a long loop between fetches. */
+function throwIfCancelled(): void {
+  if (firstSyncCancelled) throw new SyncCancelledError();
 }
 
 // ── Sync orchestration ──────────────────────────────────────────────────────
@@ -773,6 +931,7 @@ async function tooOldToSync(): Promise<string | null> {
 export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
   ok: boolean;
   error?: string;
+  cancelled?: boolean;
   synced?: number;
   stateChanged?: number;
   people?: number;
@@ -793,6 +952,7 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
   const errors: string[] = [];
   let anySuccess = false;
   let revoked = false;
+  let cancelled = false;
   let pushed = 0;
   let stateChanged = 0;
   let peopleRows = 0;
@@ -804,41 +964,18 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
       anySuccess = true;
     } catch (err: any) {
       if (err instanceof DeviceRevokedError) revoked = true;
+      else if (err instanceof SyncCancelledError) cancelled = true;
       else errors.push(err?.message ?? String(err));
     }
 
-    // Pulls never run while the camera is live — the single largest memory
-    // win in the whole app (UNIFIED-02 §8.1).
-    if (!revoked && !opts?.pushOnly && !cameraLive) {
-      try {
-        const state = await pullState(config.serverUrl, config.token);
-        stateChanged = state.changed;
-        unknownIds = state.unknownIds;
-        anySuccess = true;
-      } catch (err: any) {
-        if (err instanceof DeviceRevokedError) revoked = true;
-        else errors.push(err?.message ?? String(err));
-      }
-    }
-
-    // Identity rarely — when the interval says it is due, or when the state
-    // pull just returned an id this device has never seen.
-    if (!revoked && !opts?.pushOnly && !cameraLive) {
-      const flag = await get<{ key: string; at: number }>("meta", "people-pulled");
-      const due = !flag || Date.now() - flag.at > 10 * 60_000 || unknownIds.length > 0;
-      if (due) {
-        try {
-          peopleRows = await pullPeople(config.serverUrl, config.token);
-          await put<{ key: string; at: number }>("meta", { key: "people-pulled", at: Date.now() });
-          anySuccess = true;
-        } catch (err: any) {
-          if (err instanceof DeviceRevokedError) revoked = true;
-          else errors.push(err?.message ?? String(err));
-        }
-      }
-    }
-
-    // Config every few minutes — PINs, meal windows, intervals.
+    // Config FIRST, ahead of the roster. Both are cheap — a few KB — and
+    // between them they carry everything that makes the phone usable at all:
+    // the PIN list, the meal windows, and the role from /info. They used to
+    // run last, stuck behind a roster pull that can take minutes on a weak
+    // link, which is why a phone mid-first-sync sat there showing "Role —"
+    // and "PINs 0" (observed live). A roster that is still arriving is a
+    // phone that works with an incomplete list; a role that is still
+    // arriving is a phone that cannot do anything at all.
     if (!revoked && !opts?.pushOnly && !cameraLive) {
       const flag = await get<{ key: string; at: number }>("meta", "config-pulled");
       const due = !flag || Date.now() - flag.at > 5 * 60_000;
@@ -850,6 +987,43 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
           anySuccess = true;
         } catch (err: any) {
           if (err instanceof DeviceRevokedError) revoked = true;
+          else if (err instanceof SyncCancelledError) cancelled = true;
+          else errors.push(err?.message ?? String(err));
+        }
+      }
+    }
+
+    // Pulls never run while the camera is live — the single largest memory
+    // win in the whole app (UNIFIED-02 §8.1).
+    if (!revoked && !cancelled && !opts?.pushOnly && !cameraLive) {
+      try {
+        const state = await pullState(config.serverUrl, config.token);
+        stateChanged = state.changed;
+        unknownIds = state.unknownIds;
+        anySuccess = true;
+      } catch (err: any) {
+        if (err instanceof DeviceRevokedError) revoked = true;
+        else if (err instanceof SyncCancelledError) cancelled = true;
+        else errors.push(err?.message ?? String(err));
+      }
+    }
+
+    // Identity rarely — when the interval says it is due, or when the state
+    // pull just returned an id this device has never seen.
+    if (!revoked && !cancelled && !opts?.pushOnly && !cameraLive) {
+      const flag = await get<{ key: string; at: number }>("meta", "people-pulled");
+      const due = !flag || Date.now() - flag.at > 10 * 60_000 || unknownIds.length > 0;
+      if (due) {
+        try {
+          peopleRows = await pullPeople(config.serverUrl, config.token);
+          // Only a pull that ran to the last page counts as "done for the
+          // next 10 minutes". A cancelled one deliberately leaves the flag
+          // alone so the very next tick resumes from the saved cursor.
+          await put<{ key: string; at: number }>("meta", { key: "people-pulled", at: Date.now() });
+          anySuccess = true;
+        } catch (err: any) {
+          if (err instanceof DeviceRevokedError) revoked = true;
+          else if (err instanceof SyncCancelledError) cancelled = true;
           else errors.push(err?.message ?? String(err));
         }
       }
@@ -860,12 +1034,13 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
     // the kind of thing that must never overlap a live camera). No due
     // check: it's a no-op scan whenever nothing is pending, which is nearly
     // always — new enrolments are rare, not a recurring poll.
-    if (!revoked && !opts?.pushOnly && !cameraLive) {
+    if (!revoked && !cancelled && !opts?.pushOnly && !cameraLive) {
       try {
         await pushWageWorkers(config.serverUrl, config.token);
         anySuccess = true;
       } catch (err: any) {
         if (err instanceof DeviceRevokedError) revoked = true;
+        else if (err instanceof SyncCancelledError) cancelled = true;
         else errors.push(err?.message ?? String(err));
       }
     }
@@ -889,11 +1064,16 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
   if (anySuccess) {
     await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
     if (config.deviceId) saveBackup(config.deviceId);
+  } else if (cancelled) {
+    await setSyncStatus({ lastError: null });
   } else {
     await setSyncStatus({ lastError: errors[0] ?? "Sync failed" });
   }
 
-  return { ok: anySuccess, error: errors[0], synced: pushed, stateChanged, people: peopleRows };
+  // `cancelled` rides back as ok:false with no error, so the scheduler's
+  // backoff counter (syncAllNow) treats it as a non-event rather than
+  // punishing the next tick for something the operator chose.
+  return { ok: anySuccess, error: errors[0], cancelled, synced: pushed, stateChanged, people: peopleRows };
 }
 
 /** Fire-and-forget — call after an event so it shows up centrally quickly
@@ -953,7 +1133,9 @@ async function syncAllNow(): Promise<void> {
   const result = await syncNow();
   if (result.ok) {
     consecutiveFailures = 0;
-  } else {
+  } else if (!result.cancelled) {
+    // A sync the operator stopped says nothing about the connection — backing
+    // off after one would punish the next tick for a deliberate choice.
     consecutiveFailures = Math.min(consecutiveFailures + 1, MAX_FAILURE_EXPONENT);
   }
 }

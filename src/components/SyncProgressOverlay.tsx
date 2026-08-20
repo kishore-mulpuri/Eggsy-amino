@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { SYNC_PROGRESS_EVENT, type SyncProgressUpdate } from "../lib/sync";
+import { SYNC_PROGRESS_EVENT, cancelFirstSync, type SyncProgressUpdate } from "../lib/sync";
 
 /** Full-screen 0–100% progress bar shown during the pairing first sync. It is
  * driven by `sync-progress` events dispatched from the sync engine (see
@@ -9,6 +9,7 @@ import { SYNC_PROGRESS_EVENT, type SyncProgressUpdate } from "../lib/sync";
 export default function SyncProgressOverlay() {
   const [update, setUpdate] = useState<SyncProgressUpdate | null>(null);
   const [visible, setVisible] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     let hideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -23,6 +24,7 @@ export default function SyncProgressOverlay() {
         hideTimer = setTimeout(() => {
           setVisible(false);
           setUpdate(null);
+          setStopping(false);
         }, 1200);
       }
     };
@@ -48,6 +50,25 @@ export default function SyncProgressOverlay() {
             style={{ width: `${Math.max(0, Math.min(100, update.pct))}%` }}
           />
         </div>
+
+        {/* The roster can take minutes on a weak signal, and the operator is
+            usually standing at a gate with people waiting. Stopping is safe:
+            the phone is already paired by this point, and every page of
+            roster already downloaded is already saved — the next sync
+            resumes from there rather than starting over. */}
+        <button
+          onClick={() => {
+            setStopping(true);
+            cancelFirstSync();
+          }}
+          disabled={stopping}
+          className="mt-5 w-full rounded-2xl border border-line py-2.5 text-sm font-semibold text-ink-muted active:bg-line/40 disabled:opacity-50"
+        >
+          {stopping ? "Stopping…" : "Cancel — finish later"}
+        </button>
+        <p className="mt-2 text-center text-[11px] leading-snug text-ink-muted">
+          Already downloaded people are kept. The rest arrives on the next sync.
+        </p>
       </div>
     </div>
   );

@@ -271,9 +271,12 @@ export async function applyPairingApproved(payload: {
   // double peak memory. The progress overlay tracks this window.
   beginSyncProgress();
   try {
-    await syncNow();
+    const first = await syncNow();
     const identity = await getDeviceIdentity();
-    if (!identity) {
+    // Retry only when the role is genuinely missing AND the operator did not
+    // stop the sync. Retrying a cancelled sync would re-open the very
+    // download they just cancelled, which reads as the button not working.
+    if (!identity && !first.cancelled) {
       // The sync above pulls config+info only when its interval says due; on a
       // brand-new pairing the flags may not exist yet, which makes them due —
       // but if the server is slow and something failed, retry the two cheap

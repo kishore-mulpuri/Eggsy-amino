@@ -44,19 +44,33 @@ export default function PeoplePage({
 
   // Thumbnails arrive lazily — this page is never the camera screen, so it is
   // the right place to fetch the ones the device lacks (UNIFIED-02 §8.2).
+  //
+  // A small fixed pool rather than a plain sequential loop: each thumb is its
+  // own request, so on a slow link the round-trip latency — not the payload —
+  // is the whole cost, and running them strictly one after another stacks
+  // every one of those waits end to end (158 people on a weak connection took
+  // minutes to trickle in, observed live). Four at a time overlaps the waits
+  // without ever holding more than four 96px JPEGs in flight, which keeps the
+  // memory rule this loop exists to respect (UNIFIED-02 §8.1) intact. Do NOT
+  // raise this to "just fetch them all" — that is the unbounded-parallel
+  // fetch the memory budget cannot absorb.
   useEffect(() => {
     let cancelled = false;
-    let stopped = false;
-    (async () => {
-      for (const p of people) {
-        if (stopped || cancelled) return;
-        const thumb = await fetchThumb(p.id);
-        if (thumb && !cancelled) setThumbs((prev) => new Set(prev).add(p.id));
+    const CONCURRENCY = 4;
+    // One shared cursor across the workers — each takes the next person as it
+    // frees up, so a slow request never blocks the others behind it.
+    let next = 0;
+    const worker = async () => {
+      while (!cancelled) {
+        const i = next++;
+        if (i >= people.length) return;
+        const thumb = await fetchThumb(people[i].id);
+        if (thumb && !cancelled) setThumbs((prev) => new Set(prev).add(people[i].id));
       }
-    })();
+    };
+    void Promise.all(Array.from({ length: Math.min(CONCURRENCY, people.length) }, worker));
     return () => {
       cancelled = true;
-      stopped = true;
     };
   }, [people]);
 
