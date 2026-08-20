@@ -1,15 +1,17 @@
-// PIN verification — entirely offline, against the server PIN list that
-// arrives in /api/device/config. There is NO device-local PIN: before
-// pairing there is nothing to protect, and the 8-character pairing code is
-// the gate. PINs are server-owned; the device never sets one.
+// PIN verification for AUTHORISING an action — entirely offline, against
+// the server PIN list that arrives in /api/device/config: manual punch,
+// backdated punch, day correction (gate); guest, second plate, override,
+// ineligible meal (canteen). One verify function returns WHO matched, so
+// the event records `authorisedBy`. PINs here are server-owned; the device
+// never sets one.
 //
-// Two capabilities, not two roles:
-//   canUnlock     — People, Settings, view history
-//   canAuthorise  — manual punch, backdated punch, day correction (gate);
-//                   guest, second plate, override, ineligible meal (canteen)
-// One verify function returns WHO matched, so the event records `authorisedBy`.
-// One 15-minute idle re-lock covers People and Settings — that is a screen
-// lock, not part of the PIN model.
+// This is a DIFFERENT lock from the Settings screen lock (settingsLock.ts),
+// which is a PIN set on the phone itself, local-only, unrelated to this
+// server-issued list. `PinEntry.canUnlock` is a leftover of an earlier
+// design where this same list also gated People/Settings — that screen
+// lock has since moved to settingsLock.ts, so `canUnlock` (and
+// `verifyPin(pin, "unlock")`) are unused on the client now, kept only
+// because the server/admin UI still stores and offers the field.
 //
 // Hashing is sha256(saltBytes || utf8(pin)), hex — the existing scheme,
 // unchanged, so verification works with no network.
@@ -63,44 +65,3 @@ export async function verifyPin(
   return null;
 }
 
-/** Whether the device holds a PIN list yet. Before pairing there is nothing
- * to protect — the 8-character pairing code is the gate (UNIFIED-02 §7) —
- * so guarded screens open freely while this is false. */
-export async function hasPins(): Promise<boolean> {
-  return (await listPins()).length > 0;
-}
-
-// ── Screen lock (15-minute idle re-lock on People and Settings) ─────────────
-
-const SESSION_KEY = "eggsy-amino-unlocked-at";
-const PIN_KEY = "eggsy-amino-unlocked-pin";
-const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
-
-export function markUnlocked(entry: PinEntry): void {
-  sessionStorage.setItem(SESSION_KEY, String(Date.now()));
-  sessionStorage.setItem(PIN_KEY, JSON.stringify(entry));
-}
-
-export function isUnlocked(): boolean {
-  const raw = sessionStorage.getItem(SESSION_KEY);
-  if (!raw) return false;
-  return Date.now() - Number(raw) < IDLE_TIMEOUT_MS;
-}
-
-/** The PIN-holder who unlocked this session, or null once the idle timeout
- * has passed. */
-export function getActivePin(): PinEntry | null {
-  if (!isUnlocked()) return null;
-  const raw = sessionStorage.getItem(PIN_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as PinEntry;
-  } catch {
-    return null;
-  }
-}
-
-export function lock(): void {
-  sessionStorage.removeItem(SESSION_KEY);
-  sessionStorage.removeItem(PIN_KEY);
-}

@@ -167,6 +167,65 @@ async function fileExists(deviceId: string): Promise<{ exists: boolean; mtime?: 
   return { exists: false };
 }
 
+const BACKUP_FILENAME_RE = /^backup-[0-9a-f]{16}\.enc$/;
+
+export interface OrphanBackupInfo {
+  /** Any backup-*.enc in the folder that ISN'T this pairing's own file — a
+   * leftover from a previous pairing this phone (or a previous install)
+   * held, which this pairing can never see or restore (see the module
+   * comment: the deviceId IS the decryption key, so a different deviceId
+   * means a different, permanently-inaccessible-from-here file). */
+  count: number;
+  newestAt: number | null;
+}
+
+/** Lists backup-*.enc files that don't belong to `excludeDeviceId` — called
+ * right after a pairing claim/approval, before applyPairingApproved()
+ * commits it, so the person setting up the phone can be warned: "this
+ * looks like it was already paired to something else." Best-effort — any
+ * failure (no permission, folder never created, web platform) reads as
+ * "no orphans", same as the rest of this file errs toward not blocking a
+ * real pairing over a diagnostic that couldn't run. */
+export async function listOrphanBackups(excludeDeviceId: string | null): Promise<OrphanBackupInfo> {
+  const none: OrphanBackupInfo = { count: 0, newestAt: null };
+  try {
+    await ensureStoragePermission();
+    const excludeName = excludeDeviceId ? `backup-${await hashDeviceId(excludeDeviceId)}.enc` : null;
+
+    let files: { name: string; mtime: number }[] = [];
+    try {
+      const res = await Filesystem.readdir({ path: BACKUP_FOLDER, directory: Directory.Documents });
+      files = res.files;
+    } catch {
+      const res = await Filesystem.readdir({
+        path: `Documents/${BACKUP_FOLDER}`,
+        directory: Directory.ExternalStorage,
+      });
+      files = res.files;
+    }
+
+    const orphans = files.filter((f) => BACKUP_FILENAME_RE.test(f.name) && f.name !== excludeName);
+    if (orphans.length === 0) return none;
+    return { count: orphans.length, newestAt: Math.max(...orphans.map((f) => f.mtime)) };
+  } catch {
+    return none;
+  }
+}
+
+/** Shared copy for the confirm() both pairing screens show when
+ * listOrphanBackups() finds something — kept in one place so the wording
+ * can't drift between the direct-pair and pending-approval paths. */
+export function describeOrphanBackups(info: OrphanBackupInfo): string {
+  const when = info.newestAt ? new Date(info.newestAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "an earlier pairing";
+  return (
+    `This phone has a saved backup from a different pairing (${when}) that this new pairing will never be able to read or restore.\n\n` +
+    `If this phone was already set up as a gate/canteen device before — and this is meant to be that SAME device — cancel now and use ` +
+    `"Replace phone" from the office admin instead, so this pairing keeps that history.\n\n` +
+    `If this is genuinely a new setup, it's safe to continue — the old backup is simply left behind, unused.\n\n` +
+    `Continue with this pairing?`
+  );
+}
+
 // ── Serialisation: Float32Array survives IndexedDB but not JSON ─────────────
 
 function personToJson(p: Person): any {

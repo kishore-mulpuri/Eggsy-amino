@@ -13,7 +13,7 @@
 // no base64 photos in any pull; descriptors as Float32Array; hard 20s
 // timeout on every fetch; bail out when navigator.onLine is false; and the
 // scheduler never pulls while the camera screen is live (setCameraLive).
-import { getAllKeys, get, getByIndex, forEachByIndex, put, del, clear } from "./db";
+import { getAll, getAllKeys, get, getByIndex, forEachByIndex, put, del, clear } from "./db";
 import { getAppVersion } from "./device";
 import { setPins } from "./pin";
 import { saveBackup } from "./backup";
@@ -35,9 +35,16 @@ export function apiBase(serverUrl: string): string {
   return import.meta.env.DEV ? "" : serverUrl;
 }
 
-/** A 401 carrying { code: "device_revoked" } from any authenticated endpoint —
- * the server has revoked this device's token. Distinct from a network error or
- * any other 401 so a flaky connection can never unpair a working phone. */
+/** Any 401 from an authenticated device endpoint — the token this phone is
+ * holding no longer matches any device row, whether because it was
+ * explicitly revoked (`code: "device_revoked"`) or because "Replace phone"
+ * overwrote this device's token with a new one for a different handset
+ * (server sets no code for that case, just a plain 401 — the server can't
+ * tell "never valid" from "used to be valid," so the client doesn't try to
+ * either; either way the ONLY fix is re-pairing). Distinct from a network
+ * error: fetchWithTimeout throws before a Response even exists on a
+ * flaky/offline connection, so an HTTP 401 is always a genuine, deliberate
+ * rejection from the server — never a symptom of bad signal. */
 export class DeviceRevokedError extends Error {
   constructor() {
     super("Device revoked");
@@ -88,18 +95,15 @@ export async function fetchWithTimeout(url: string, init?: RequestInit, timeoutM
 }
 
 /** fetch() wrapper for authenticated endpoints: passes the request through
- * unchanged (with a timeout — see fetchWithTimeout) except that a
- * revoked-device 401 is surfaced as a DeviceRevokedError. Callers still
- * check `!res.ok` for everything else. */
+ * unchanged (with a timeout — see fetchWithTimeout) except that any 401 is
+ * surfaced as a DeviceRevokedError (see the class comment for why every 401
+ * qualifies). Callers still check `!res.ok` for everything else. */
 async function authedFetch(serverUrl: string, token: string, path: string, init?: RequestInit): Promise<Response> {
   const res = await fetchWithTimeout(`${apiBase(serverUrl)}${path}`, {
     ...init,
     headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
   });
-  if (res.status === 401) {
-    const body = await res.json().catch(() => null);
-    if (body?.code === "device_revoked") throw new DeviceRevokedError();
-  }
+  if (res.status === 401) throw new DeviceRevokedError();
   return res;
 }
 
@@ -190,6 +194,15 @@ export async function getReasonCodes(): Promise<ReasonCode[]> {
   return r?.codes ?? [];
 }
 
+/** Role names for the wage-enrolment picker (Wages > Roles, admin sets the
+ * rate; the device only ever sees names — see server/routes/device.ts's
+ * /config handler). Empty on a canteen device, which never enrols wage
+ * workers. */
+export async function getWageRoles(): Promise<string[]> {
+  const r = await get<{ key: string; roles: string[] }>("meta", "wage-roles");
+  return r?.roles ?? [];
+}
+
 export async function getSyncIntervals(): Promise<SyncIntervals> {
   const s = await get<{ key: string; intervals: SyncIntervals }>("meta", "sync-intervals");
   return (
@@ -249,6 +262,9 @@ async function pullConfig(serverUrl: string, token: string): Promise<void> {
 
   const codes: ReasonCode[] = Array.isArray(body?.reasonCodes) ? body.reasonCodes : [];
   await put<{ key: string; codes: ReasonCode[] }>("meta", { key: "reason-codes", codes });
+
+  const wageRoles: string[] = Array.isArray(body?.wageRoles) ? body.wageRoles : [];
+  await put<{ key: string; roles: string[] }>("meta", { key: "wage-roles", roles: wageRoles });
 
   // Intervals come from /config, not constants — changing a rush window
   // must not need a new APK (UNIFIED-02 §6.2).
@@ -569,6 +585,54 @@ export async function pushEvents(serverUrl: string, token: string): Promise<numb
   return pushed;
 }
 
+/** Push wage workers enrolled locally at the gate (people.ts
+ * createWagePerson/updateWagePerson set `enrollPending`) to
+ * POST /api/device/enroll, so they show up in Wages > Workers/Today the
+ * same as a worker enrolled on the old Eggsy-Payroll app. Runs where
+ * syncNow() calls it — the same gated block as the config/people pulls, so
+ * it never overlaps a full-size photo upload with a live camera. Small
+ * population (tens, not thousands), so a plain getAll + filter is fine —
+ * this is the same "people" store pullPeople already holds in memory. */
+export async function pushWageWorkers(serverUrl: string, token: string): Promise<number> {
+  const all = await getAll<Person>("people");
+  const pending = all.filter((p) => p.kind === "wage" && p.enrollPending);
+  if (pending.length === 0) return 0;
+
+  const BATCH = 50;
+  let pushed = 0;
+  for (let i = 0; i < pending.length; i += BATCH) {
+    const batch = pending.slice(i, i + BATCH);
+    const workers = await Promise.all(
+      batch.map(async (p) => {
+        const thumb = await get<{ dataUrl: string }>("thumbs", p.id);
+        return {
+          id: p.id,
+          name: p.name,
+          aadharNumber: p.aadhar ?? "",
+          faceDescriptor: p.descriptor ? Array.from(p.descriptor) : [],
+          role: p.role ?? null,
+          photoDataUrl: thumb?.dataUrl ?? "",
+          isActive: p.isActive,
+        };
+      }),
+    );
+
+    const res = await authedFetch(serverUrl, token, "/api/device/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workers }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Enroll push responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    }
+
+    await Promise.all(batch.map((p) => put<Person>("people", { ...p, enrollPending: false })));
+    pushed += batch.length;
+  }
+  return pushed;
+}
+
 /** Cap audit-photo retention (UNIFIED-02 §8.8): capturedPhoto is base64 in
  * IndexedDB and grows forever without this. Prunes rows older than
  * photoRetentionDays. Runs on a sync tick, never per event, and never while
@@ -614,10 +678,18 @@ export async function wipeLocalDeviceData(): Promise<void> {
     del("meta", "pins"),
     del("meta", "meal-windows"),
     del("meta", "reason-codes"),
+    del("meta", "wage-roles"),
     del("meta", "sync-intervals"),
     del("meta", "app-version-info"),
     del("meta", "photo-retention-days"),
     del("meta", "duplicate-window-ms"),
+    // Local-only Settings PIN (settingsLock.ts) — a different device
+    // identity re-paired onto this same phone should not inherit whatever
+    // PIN was set for the previous assignment; whoever re-pairs it sets a
+    // fresh one. A "replace" onto the SAME deviceId does not wipe (see the
+    // comment above this function), so the old PIN correctly survives that
+    // case — it's still the same phone, same site.
+    del("meta", "settings-lock"),
   ]);
 }
 
@@ -780,6 +852,21 @@ export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
           if (err instanceof DeviceRevokedError) revoked = true;
           else errors.push(err?.message ?? String(err));
         }
+      }
+    }
+
+    // Wage-worker enrolments made locally at the gate — same gate as the
+    // config/people pulls above (a full-size enrolment photo is exactly
+    // the kind of thing that must never overlap a live camera). No due
+    // check: it's a no-op scan whenever nothing is pending, which is nearly
+    // always — new enrolments are rare, not a recurring poll.
+    if (!revoked && !opts?.pushOnly && !cameraLive) {
+      try {
+        await pushWageWorkers(config.serverUrl, config.token);
+        anySuccess = true;
+      } catch (err: any) {
+        if (err instanceof DeviceRevokedError) revoked = true;
+        else errors.push(err?.message ?? String(err));
       }
     }
 

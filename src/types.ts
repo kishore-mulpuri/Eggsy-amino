@@ -50,6 +50,11 @@ export interface Person {
    * roster and are NOT uploaded by any endpoint in the contract (§5). */
   aadhar?: string | null;
   role?: string | null;
+  /** True when this wage worker's identity (name/aadhar/photo/descriptor/
+   * role) has local changes the server hasn't seen yet — set by
+   * createWagePerson()/updateWagePerson(), cleared once pushWageWorkers()
+   * (sync.ts) confirms the upload. Wage-only; payroll rows never set it. */
+  enrollPending?: boolean;
 }
 
 /** The core record: a punch or a plate. Same row, different `type`.

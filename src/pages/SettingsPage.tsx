@@ -11,8 +11,9 @@ import {
   forceFullResync,
   getBackoffState,
 } from "../lib/sync";
-import { listPins, lock } from "../lib/pin";
-import { checkBackup, restoreFromBackup, saveBackup, type BackupMetadata } from "../lib/backup";
+import { listPins } from "../lib/pin";
+import { lockSettings } from "../lib/settingsLock";
+import { checkBackup, restoreFromBackup, saveBackup, listOrphanBackups, describeOrphanBackups, type BackupMetadata } from "../lib/backup";
 import { checkLocationNow, getLocationStatus, type LocationStatus } from "../lib/location";
 import { MEAL_LABEL, formatWhen } from "../lib/labels";
 import {
@@ -121,6 +122,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     try {
       const result = await claimPairingCode(code);
       if (result.status === "approved") {
+        const orphans = await listOrphanBackups(result.deviceId);
+        if (orphans.count > 0 && !confirm(describeOrphanBackups(orphans))) {
+          setPairResult({ ok: false, message: "Pairing cancelled — that code has been used up; ask the office for a new one." });
+          return;
+        }
         await applyPairingApproved(result);
         setPairResult({
           ok: true,
@@ -437,12 +443,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <section className="border-t border-line pt-4 pb-2">
           <button
             onClick={() => {
-              lock();
+              lockSettings();
               window.location.reload();
             }}
             className="text-sm text-ink-muted underline"
           >
-            Lock this device
+            Lock Settings
           </button>
         </section>
       </div>

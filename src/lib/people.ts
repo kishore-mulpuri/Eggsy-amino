@@ -102,8 +102,9 @@ export async function fetchThumb(personId: string): Promise<string | null> {
 
 // ── Wage enrolment (gate role only) ────────────────────────────────────────
 // A wage worker enrolled here is a local row: name, Aadhar, photo (kept as
-// the local thumb), role, and a face descriptor captured at enrolment. The
-// contract's endpoints carry no wage-enrolment upload — see the build notes.
+// the local thumb), role, and a face descriptor captured at enrolment.
+// `enrollPending` marks it for the next sync — see pushWageWorkers() in
+// sync.ts, which uploads it to POST /api/device/enroll and clears the flag.
 
 export async function createWagePerson(input: {
   name: string;
@@ -129,6 +130,7 @@ export async function createWagePerson(input: {
     cachedAt: Date.now(),
     aadhar: input.aadhar.trim(),
     role: input.role.trim(),
+    enrollPending: true,
   };
   await put<Person>("people", person);
   // The enrolment photo is the one photo this row owns — store it as the
@@ -156,6 +158,7 @@ export async function updateWagePerson(
     isActive: patch.isActive ?? existing.isActive,
     descriptor: patch.descriptor ? Float32Array.from(patch.descriptor) : existing.descriptor,
     cachedAt: Date.now(),
+    enrollPending: true,
   };
   await put<Person>("people", next);
   if (patch.photoDataUrl) {

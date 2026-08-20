@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import BottomNav, { type View } from "./components/BottomNav";
 import SyncProgressOverlay from "./components/SyncProgressOverlay";
-import LockScreen from "./pages/LockScreen";
+import SettingsLockScreen from "./pages/SettingsLockScreen";
 import CameraPage from "./pages/CameraPage";
 import PeoplePage from "./pages/PeoplePage";
 import PersonDetailPage from "./pages/PersonDetailPage";
 import PersonFormPage from "./pages/PersonFormPage";
 import SettingsPage from "./pages/SettingsPage";
 import PairingWaitPage from "./pages/PairingWaitPage";
-import { isUnlocked, hasPins } from "./lib/pin";
+import { isSettingsUnlocked } from "./lib/settingsLock";
 import { startWatchingLocation } from "./lib/location";
 import { getDeviceConfig, DEVICE_REVOKED_EVENT } from "./lib/sync";
 import { getPendingPairing, PAIRING_CHANGE_EVENT } from "./lib/pairing";
@@ -20,15 +20,15 @@ type Screen =
   | { view: "person-form"; id: string | null }
   | { view: "settings" };
 
-// The camera is intentionally always open — anyone should be able to walk up
-// and punch or collect a plate without a PIN (UNIFIED-02 §4.1). Everything
-// else is behind the lock.
-const PROTECTED: View[] = ["people", "settings"];
+// Camera and People are always open — anyone should be able to walk up and
+// punch or collect a plate without a PIN (UNIFIED-02 §4.1), and any
+// operator should be able to check the roster. Only Settings is behind a
+// PIN — set on this phone the first time it's opened (settingsLock.ts).
+const PROTECTED: View[] = ["settings"];
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ view: "camera" });
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
-  const [pinsLoaded, setPinsLoaded] = useState(false);
 
   // Pairing state, re-read whenever pairing or revocation changes.
   const [paired, setPaired] = useState<boolean | null>(null);
@@ -45,13 +45,11 @@ export default function App() {
   useEffect(() => {
     let active = true;
     async function load() {
-      const [config, pending, pins] = await Promise.all([
+      const [config, pending] = await Promise.all([
         getDeviceConfig(),
         getPendingPairing(),
-        hasPins(),
       ]);
       if (!active) return;
-      setPinsLoaded(pins);
       const wasPending = prevPendingRef.current;
       const nowPending = !!pending?.pendingId;
       setPaired(!!config);
@@ -91,10 +89,7 @@ export default function App() {
   }
 
   function requestScreen(target: Screen) {
-    // Before pairing there is nothing to protect — the pairing code is the
-    // gate (UNIFIED-02 §7). Once the PIN list has arrived, People and
-    // Settings re-lock behind it.
-    if (screenIsProtected(target) && pinsLoaded && !isUnlocked()) {
+    if (screenIsProtected(target) && !isSettingsUnlocked()) {
       setPendingScreen(target);
       return;
     }
@@ -125,10 +120,10 @@ export default function App() {
     );
   }
 
-  // PIN lock for guarded screens.
+  // PIN lock for Settings.
   if (pendingScreen) {
     return (
-      <LockScreen
+      <SettingsLockScreen
         onUnlock={handleUnlocked}
         onCancel={() => {
           setPendingScreen(null);
@@ -168,10 +163,10 @@ export default function App() {
       {screen.view === "settings" && <SettingsPage onBack={() => setScreen({ view: "camera" })} />}
 
       {screen.view === "camera" && (
-        <BottomNav active="camera" onChange={handleNavigate} unlocked={!pinsLoaded || isUnlocked()} />
+        <BottomNav active="camera" onChange={handleNavigate} unlocked={isSettingsUnlocked()} />
       )}
-      {screen.view === "people" && <BottomNav active="people" onChange={handleNavigate} unlocked={!pinsLoaded || isUnlocked()} />}
-      {screen.view === "settings" && <BottomNav active="settings" onChange={handleNavigate} unlocked={!pinsLoaded || isUnlocked()} />}
+      {screen.view === "people" && <BottomNav active="people" onChange={handleNavigate} unlocked={isSettingsUnlocked()} />}
+      {screen.view === "settings" && <BottomNav active="settings" onChange={handleNavigate} unlocked={isSettingsUnlocked()} />}
 
       {/* Pairing first-sync progress — shows over whatever screen is under it
           (Settings pairing, or the wait screen above). */}

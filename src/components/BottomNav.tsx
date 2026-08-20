@@ -8,8 +8,9 @@ const TABS: { id: View; label: string; Icon: (p: { size?: number }) => JSX.Eleme
   { id: "settings", label: "Settings", Icon: IconSettings },
 ];
 
-/** Exactly three tabs (UNIFIED-02 §4). People and Settings are PIN-gated —
- * the lock dot just advertises that; the gate itself lives in App. */
+/** Exactly three tabs (UNIFIED-02 §4). Only Settings is PIN-gated (a
+ * phone-set PIN, see settingsLock.ts) — the lock dot just advertises that;
+ * the gate itself lives in App. Camera and People are always open. */
 export default function BottomNav({
   active,
   onChange,
@@ -22,7 +23,7 @@ export default function BottomNav({
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-surface border-t border-line flex pb-[env(safe-area-inset-bottom)] z-20">
       {TABS.map(({ id, label, Icon }) => {
-        const guarded = id !== "camera";
+        const guarded = id === "settings";
         return (
           <button
             key={id}

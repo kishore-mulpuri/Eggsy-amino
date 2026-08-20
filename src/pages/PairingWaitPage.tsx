@@ -8,6 +8,7 @@ import {
   setPairingNotice,
   type PairPollResult,
 } from "../lib/pairing";
+import { listOrphanBackups, describeOrphanBackups } from "../lib/backup";
 import { getServerUrl, getDeviceConfig } from "../lib/sync";
 import { getAppVersion } from "../lib/device";
 import { IconCamera } from "../components/Icons";
@@ -59,6 +60,12 @@ export default function PairingWaitPage({ onApproved }: { onApproved: () => void
       if (cancelled) return;
 
       if (outcome.status === "approved") {
+        const orphans = await listOrphanBackups(outcome.deviceId);
+        if (orphans.count > 0 && !confirm(describeOrphanBackups(orphans))) {
+          setPairingNotice("Pairing cancelled — that code has been used up; ask the office for a new one.");
+          await clearPendingPairing();
+          return;
+        }
         // Persist the token first — the endpoint delivers it exactly once.
         await applyPairingApproved(outcome);
         if (!cancelled) onApproved();

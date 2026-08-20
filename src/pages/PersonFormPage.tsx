@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { createWagePerson, getPerson, updateWagePerson } from "../lib/people";
-import { syncSoon } from "../lib/sync";
+import { syncSoon, getWageRoles } from "../lib/sync";
 import { IconBack } from "../components/Icons";
 import type { Person } from "../types";
 
@@ -24,6 +24,14 @@ export default function PersonFormPage({
   const [showCamera, setShowCamera] = useState(personId === null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [wageRoles, setWageRoles] = useState<string[]>([]);
+
+  // Wages > Roles, pulled down with every /config sync. Offered as
+  // suggestions, not a hard list — a phone that hasn't synced since a role
+  // was added (or paired offline) must still be able to enrol someone.
+  useEffect(() => {
+    getWageRoles().then(setWageRoles);
+  }, []);
 
   useEffect(() => {
     if (!personId) return;
@@ -103,10 +111,14 @@ export default function PersonFormPage({
           <span className="label">Role</span>
           <input
             className="input"
+            list="wage-role-options"
             value={role}
             onChange={(e) => setRole(e.target.value)}
-            placeholder="e.g. Mason, Helper"
+            placeholder={wageRoles.length ? "Pick or type a role" : "e.g. Mason, Helper"}
           />
+          <datalist id="wage-role-options">
+            {wageRoles.map((r) => <option key={r} value={r} />)}
+          </datalist>
         </label>
 
         {existing && !showCamera && (
