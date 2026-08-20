@@ -252,6 +252,17 @@ export async function applyPairingApproved(payload: {
   // the very end, so the app keeps showing the wait screen through the first
   // sync instead of flipping to the normal tree (and an empty roster) early.
   await clearPendingPairingInternal();
+  // Force the next sync to treat config+info as due, regardless of the
+  // "at most every 5 min" throttle in syncNow(). That timestamp lives in
+  // local storage and is NOT reset by pairing — a "replace" keeps everything
+  // (deliberately, see the wipe comment above), and even a brand-new pairing
+  // can land on a phone/browser that already synced under a previous token
+  // in the last 5 minutes. Without this, the role from /info can sit stale
+  // for up to 5 minutes after a successful pairing, stuck on "waiting for
+  // the server to confirm this device's role" with no way to force it
+  // (Sync now hits the exact same throttle) — this was reproduced live.
+  await del("meta", "config-pulled");
+  await del("meta", "people-pulled");
   // Full sync, awaited: the roster (people), the state channel, AND the
   // config pull (which brings the PIN list — before pairing there is nothing
   // to protect, but a paired phone must always have a PIN list, UNIFIED-02

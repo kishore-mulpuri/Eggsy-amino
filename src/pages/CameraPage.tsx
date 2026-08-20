@@ -39,7 +39,7 @@ import { localDate } from "../lib/id";
 import { MEAL_LABEL, STATE_LABEL, STATE_BADGE, formatTime } from "../lib/labels";
 import type { Event, EventState, Meal, MealWindow, Person, Role } from "../types";
 import AuthorizeSheet, { type AuthorizeData } from "../components/AuthorizeSheet";
-import { IconSearch, IconUser, IconWifiOff, IconCamera, IconCheck, IconRefresh } from "../components/Icons";
+import { IconSearch, IconWifiOff, IconCamera, IconCheck, IconRefresh } from "../components/Icons";
 
 const STATE_PULL_MAX_AGE_MS = 15 * 60_000; // UNIFIED-00 §8 — stop guessing after 15 min
 
@@ -981,24 +981,15 @@ export default function CameraPage({ active }: { active: boolean }) {
       )}
 
       {/* Bottom controls */}
+      {/* Guest recording moved server-side (Canteen > Exceptions > Add
+          exception, canteen.ts) — this button's only outcome was a "not
+          recorded, write it on paper" dialog, so an admin now types it in
+          directly from that paper log instead. */}
       {!match && !punchPlan && !outcome && (
         <div className="px-4 pt-3 flex gap-2">
           <button onClick={() => setShowSearch(true)} className="btn-outline flex-1 py-3">
             <IconSearch size={18} /> Find by name
           </button>
-          {role === "canteen" && (
-            <button
-              onClick={async () => {
-                // PHASE 2 (guest) — paper in v1, so the button routes there.
-                const { meal: m, outsideWindow: ow } = currentMeal(new Date(), windows);
-                const result = await computePlan(null, false, null, m, ow);
-                if (result.kind === "paper") setPaperMessage(result.message);
-              }}
-              className="btn-accent flex-1 py-3"
-            >
-              <IconUser size={18} /> Guest
-            </button>
-          )}
         </div>
       )}
 
