@@ -27,6 +27,13 @@ export interface Person {
   descriptor: Float32Array | null;
   /** Day-diverse recent live-capture embeddings, for matching tolerance. */
   recentEmbeddings: Float32Array[];
+  /** Extra face samples captured ON THIS PHONE for someone the camera keeps
+   * failing to recognise (see addLocalFaceSample). Device-local by design:
+   * never pushed, and the identity pull preserves them because it spreads
+   * the existing row before overwriting named fields. Optional because rows
+   * written by older builds predate it — every read must tolerate undefined
+   * or an app update would break the camera on existing phones. */
+  localSamples?: Float32Array[];
   /** sha256 hex of the server thumbnail; lets the device detect a stale thumb. */
   photoHash: string | null;
   /** 96px JPEG data URL, fetched lazily from /api/device/photo/:id. May be absent. */

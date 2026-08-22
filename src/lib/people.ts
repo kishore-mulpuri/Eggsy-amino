@@ -25,10 +25,43 @@ export function matchablePeople(people: Person[]): { id: string; descriptors: Fl
     .filter((p) => p.isActive)
     .map((p) => ({
       id: p.id,
-      descriptors: [p.descriptor, ...p.recentEmbeddings].filter(
+      // `?? []` is load-bearing: rows written before localSamples existed have
+      // no such key, and spreading undefined throws. This runs on every
+      // recognition pass, so it must never be the thing that kills the camera.
+      descriptors: [p.descriptor, ...(p.localSamples ?? []), ...p.recentEmbeddings].filter(
         (d): d is Float32Array => d instanceof Float32Array && d.length > 0,
       ),
     }));
+}
+
+/** Hard cap on device-local samples per person. The whole gallery is rebuilt
+ * on every recognition pass (CameraPage.scanFrame), so this bounds both the
+ * per-scan work and the IndexedDB row size. Five different days/lighting
+ * conditions is already well past the point of diminishing returns. */
+export const MAX_LOCAL_SAMPLES = 5;
+
+/** Teach THIS PHONE another view of someone the camera keeps missing.
+ * Descriptor only — no photo — so the row stays small. Oldest sample is
+ * dropped once the cap is reached, keeping the most recent appearance.
+ * Never sets enrollPending: this is local matching help, not an identity
+ * change, and must not be pushed to the server. */
+export async function addLocalFaceSample(id: string, descriptor: ArrayLike<number>): Promise<number> {
+  const existing = await getPerson(id);
+  if (!existing) throw new Error("Person not found");
+  const sample = Float32Array.from(descriptor);
+  if (sample.length === 0) throw new Error("Empty face sample");
+  const kept = [...(existing.localSamples ?? []), sample].slice(-MAX_LOCAL_SAMPLES);
+  await put<Person>("people", { ...existing, localSamples: kept, cachedAt: Date.now() });
+  return kept.length;
+}
+
+/** Drop every device-local sample for someone — the undo when samples were
+ * captured against the wrong person. Enrolment and server-sent embeddings
+ * are untouched, so matching falls back to exactly what it was before. */
+export async function clearLocalFaceSamples(id: string): Promise<void> {
+  const existing = await getPerson(id);
+  if (!existing) return;
+  await put<Person>("people", { ...existing, localSamples: [], cachedAt: Date.now() });
 }
 
 export async function getPerson(id: string): Promise<Person | undefined> {
@@ -120,6 +153,7 @@ export async function createWagePerson(input: {
     empCode: null,
     descriptor: Float32Array.from(input.descriptor),
     recentEmbeddings: [],
+    localSamples: [],
     photoHash: null,
     thumb: null,
     eligibility: { breakfast: false, lunch: true, dinner: false },

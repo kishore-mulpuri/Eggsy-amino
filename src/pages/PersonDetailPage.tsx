@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { getPerson, deactivateWagePerson } from "../lib/people";
+import {
+  getPerson,
+  deactivateWagePerson,
+  addLocalFaceSample,
+  clearLocalFaceSamples,
+  MAX_LOCAL_SAMPLES,
+} from "../lib/people";
+import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { listEventsForPerson, recordEvent } from "../lib/events";
 import { getDeviceIdentity, syncSoon } from "../lib/sync";
 import { getCachedLocation } from "../lib/location";
@@ -26,6 +33,8 @@ export default function PersonDetailPage({
   const [manualBusy, setManualBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [backTs, setBackTs] = useState("");
+  const [faceHelp, setFaceHelp] = useState(false);
+  const [faceMsg, setFaceMsg] = useState<string | null>(null);
 
   useEffect(() => {
     refresh();
@@ -69,6 +78,34 @@ export default function PersonDetailPage({
     } finally {
       setManualBusy(false);
     }
+  }
+
+  /** Store one more view of this face on THIS phone. The camera already
+   * rejected spoofs and confirmed a face before handing us an embedding, so
+   * the only judgement left is "is this the right person", which is the
+   * operator's — they navigated here by name. */
+  async function handleFaceSample(cap: CaptureResult) {
+    if (!person) return;
+    try {
+      const n = await addLocalFaceSample(person.id, cap.face.embedding!);
+      setFaceMsg(
+        n >= MAX_LOCAL_SAMPLES
+          ? `Saved — ${n} of ${MAX_LOCAL_SAMPLES} samples (oldest now replaced as you add more).`
+          : `Saved — ${n} of ${MAX_LOCAL_SAMPLES} samples. Add more on different days or lighting.`,
+      );
+      setFaceHelp(false);
+      refresh();
+    } catch (err: any) {
+      setFaceMsg(err?.message ?? "Could not save the face sample");
+    }
+  }
+
+  async function handleClearSamples() {
+    if (!person) return;
+    if (!confirm(`Remove the face samples added on this phone for ${person.name}?`)) return;
+    await clearLocalFaceSamples(person.id);
+    setFaceMsg("Removed. Matching is back to the enrolled photo.");
+    refresh();
   }
 
   if (!person) return null;
@@ -116,6 +153,25 @@ export default function PersonDetailPage({
               Deactivate
             </button>
           )}
+        </div>
+      )}
+
+      {/* Teach this phone a face the camera keeps missing. Gate only, and
+          local to this device — the office never sees these samples. */}
+      {role === "gate" && (
+        <div className="px-4 mt-2">
+          <div className="flex gap-2">
+            <button onClick={() => { setFaceMsg(null); setFaceHelp(true); }} className="btn-outline flex-1 py-2.5 text-sm">
+              Improve face match
+              {(person.localSamples?.length ?? 0) > 0 && ` (${person.localSamples!.length})`}
+            </button>
+            {(person.localSamples?.length ?? 0) > 0 && (
+              <button onClick={handleClearSamples} className="btn-outline px-3 py-2.5 text-sm shrink-0">
+                Reset
+              </button>
+            )}
+          </div>
+          {faceMsg && <p className="text-[13px] text-ink-muted mt-2">{faceMsg}</p>}
         </div>
       )}
 
@@ -172,6 +228,29 @@ export default function PersonDetailPage({
           ))}
         </div>
       </div>
+
+      {/* Face-sample capture. Mounted only while open so the camera stream
+          and the face engine are released the moment it closes — leaving a
+          second video stream running is what makes the phone heat up. */}
+      {faceHelp && (
+        <div className="fixed inset-0 z-40 bg-black/50 flex items-end sm:items-center sm:justify-center">
+          <div className="bg-bg w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl shadow-float p-5 max-h-[92vh] overflow-y-auto">
+            <h2 className="text-lg font-bold text-ink mb-1">Improve face match — {person.name}</h2>
+            <p className="text-[13px] text-ink-muted mb-4">
+              Capture {person.name} as they look now. This stays on this phone
+              and only helps the camera recognise them here — it does not
+              change their enrolled photo.
+            </p>
+            <CameraCapture captureLabel="Capture face sample" onCapture={handleFaceSample} />
+            <button
+              onClick={() => setFaceHelp(false)}
+              className="btn-outline w-full py-3 mt-3"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Manual punch setup: now or backdated. */}
       {manualSetup && (

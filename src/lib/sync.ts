@@ -448,6 +448,11 @@ export async function pullPeople(serverUrl: string, token: string, depth = 0): P
         recentEmbeddings: Array.isArray(p.recentEmbeddings)
           ? p.recentEmbeddings.filter((e: any) => Array.isArray(e)).map((e: number[]) => Float32Array.from(e))
           : [],
+        // Device-local face samples the server knows nothing about. The
+        // spread above already carries them, but naming them here is
+        // deliberate: it states that a pull must NEVER clear them, so this
+        // survives someone later refactoring the spread away.
+        localSamples: existing?.localSamples ?? [],
         photoHash: p.photoHash ?? null,
         thumb: null, // fetched lazily from the thumbs store, never inline in a pull
         eligibility: {

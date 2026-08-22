@@ -233,6 +233,7 @@ function personToJson(p: Person): any {
     ...p,
     descriptor: p.descriptor ? Array.from(p.descriptor) : null,
     recentEmbeddings: p.recentEmbeddings.map((d) => Array.from(d)),
+    localSamples: (p.localSamples ?? []).map((d) => Array.from(d)),
   };
 }
 
@@ -242,6 +243,11 @@ function personFromJson(p: any): Person {
     descriptor: Array.isArray(p.descriptor) ? Float32Array.from(p.descriptor) : null,
     recentEmbeddings: Array.isArray(p.recentEmbeddings)
       ? p.recentEmbeddings.map((d: number[]) => Float32Array.from(d))
+      : [],
+    // Absent in backups taken before local samples existed — restore must
+    // not turn that into `undefined` inside a Float32Array[] field.
+    localSamples: Array.isArray(p.localSamples)
+      ? p.localSamples.filter(Array.isArray).map((d: number[]) => Float32Array.from(d))
       : [],
   };
 }
