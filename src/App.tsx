@@ -16,8 +16,8 @@ import { getPendingPairing, PAIRING_CHANGE_EVENT } from "./lib/pairing";
 type Screen =
   | { view: "camera" }
   | { view: "people" }
-  | { view: "person"; id: string }
-  | { view: "person-form"; id: string | null }
+  | { view: "person"; id: string; from?: "camera" | "people" }
+  | { view: "person-form"; id: string | null; from?: "camera" | "people" }
   | { view: "settings" };
 
 // Camera and People are always open — anyone should be able to walk up and
@@ -141,24 +141,29 @@ export default function App() {
           stopping/restarting getUserMedia every time the operator switches
           tabs is the single slowest thing in the app. */}
       <div style={{ display: screen.view === "camera" ? "contents" : "none" }}>
-        <CameraPage active={screen.view === "camera"} />
+        <CameraPage
+          active={screen.view === "camera"}
+          onOpenPerson={(id) => requestScreen({ view: "person", id, from: "camera" })}
+        />
       </div>
 
       {screen.view === "people" && (
         <PeoplePage
-          onOpenPerson={(id) => requestScreen({ view: "person", id })}
+          onOpenPerson={(id) => requestScreen({ view: "person", id, from: "people" })}
           onEnrol={() => requestScreen({ view: "person-form", id: null })}
         />
       )}
       {screen.view === "person" && (
         <PersonDetailPage
           personId={screen.id}
-          onBack={() => setScreen({ view: "people" })}
-          onEdit={() => requestScreen({ view: "person-form", id: screen.id })}
+          onBack={() => setScreen(screen.from === "camera" ? { view: "camera" } : { view: "people" })}
         />
       )}
       {screen.view === "person-form" && (
-        <PersonFormPage personId={screen.id} onBack={() => setScreen(screen.id ? { view: "person", id: screen.id } : { view: "people" })} />
+        <PersonFormPage
+          personId={screen.id}
+          onBack={() => setScreen(screen.id ? { view: "person", id: screen.id, from: screen.from } : { view: "people" })}
+        />
       )}
       {screen.view === "settings" && <SettingsPage onBack={() => setScreen({ view: "camera" })} />}
 

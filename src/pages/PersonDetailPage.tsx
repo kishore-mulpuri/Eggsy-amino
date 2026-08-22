@@ -7,12 +7,21 @@ import {
   MAX_LOCAL_SAMPLES,
 } from "../lib/people";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
-import { listEventsForPerson, recordEvent } from "../lib/events";
-import { getDeviceIdentity, syncSoon } from "../lib/sync";
+import {
+  listEventsForPerson,
+  recordEvent,
+  currentMeal,
+  checkEligible,
+  alreadyServed,
+  nextTokenNumber,
+  stateIsFreshForToday,
+} from "../lib/events";
+import { getDeviceIdentity, syncSoon, getMealWindows, getSyncStatus } from "../lib/sync";
 import { getCachedLocation } from "../lib/location";
+import { localDate } from "../lib/id";
 import { MEAL_LABEL, STATE_LABEL, STATE_BADGE, formatDate, formatTime } from "../lib/labels";
-import { IconBack, IconPlus } from "../components/Icons";
-import type { Event, Person } from "../types";
+import { IconBack, IconPlus, IconCheck } from "../components/Icons";
+import type { Event, EventState, MealWindow, Person } from "../types";
 
 /** One person's history: punch history and their exceptions list both live
  * here. Gate role → manual punch, now or backdated
@@ -20,25 +29,39 @@ import type { Event, Person } from "../types";
 export default function PersonDetailPage({
   personId,
   onBack,
-  onEdit,
 }: {
   personId: string;
   onBack: () => void;
-  onEdit?: () => void;
 }) {
   const [person, setPerson] = useState<Person | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
   const [role, setRole] = useState<string | null>(null);
+  const [siteCode, setSiteCode] = useState("X");
+  const [windows, setWindows] = useState<MealWindow[]>([]);
+  const [statePullAt, setStatePullAt] = useState<number | null>(null);
   const [manualSetup, setManualSetup] = useState<"in" | "out" | null>(null);
   const [manualBusy, setManualBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [backTs, setBackTs] = useState("");
   const [faceHelp, setFaceHelp] = useState(false);
   const [faceMsg, setFaceMsg] = useState<string | null>(null);
+  const [serveBusy, setServeBusy] = useState(false);
+  const [serveMsg, setServeMsg] = useState<string | null>(null);
+  const [serveDone, setServeDone] = useState<Event | null>(null);
 
   useEffect(() => {
     refresh();
-    getDeviceIdentity().then((i) => setRole(i?.role ?? null));
+    (async () => {
+      const [i, wins, status] = await Promise.all([
+        getDeviceIdentity(),
+        getMealWindows(),
+        getSyncStatus(),
+      ]);
+      setRole(i?.role ?? null);
+      setSiteCode(i?.siteCode ?? "X");
+      setWindows(wins);
+      setStatePullAt(status.lastStatePullAt);
+    })();
   }, [personId]);
 
   async function refresh() {
@@ -108,10 +131,74 @@ export default function PersonDetailPage({
     refresh();
   }
 
+  /** Serve this person the current meal from their detail page — the canteen
+   * mirror of the camera's Serve card, reached by name-pick. Same v1 rules
+   * (UNIFIED-00 §6): eligibility, present-today and duplicate checks all
+   * route to paper; a normal plate is recorded as-is. */
+  async function handleServe() {
+    if (serveBusy || !person) return;
+    setServeBusy(true);
+    setServeMsg(null);
+    try {
+      const { meal, outsideWindow } = currentMeal(new Date(), windows);
+      const pullFresh = statePullAt != null && localDate(new Date(statePullAt)) === localDate();
+      const personFresh = stateIsFreshForToday(person);
+
+      if (!checkEligible(person, meal)) {
+        setServeMsg(`${person.name} is not on the ${MEAL_LABEL[meal].toLowerCase()} list — record this plate on paper.`);
+        return;
+      }
+
+      let state: EventState;
+      if (!pullFresh || !personFresh) {
+        state = "unverified_attendance";
+      } else if (person.presentToday) {
+        state = "name_matched";
+      } else {
+        setServeMsg(`${person.name} is not present today — record this plate on paper.`);
+        return;
+      }
+
+      const dup = await alreadyServed(person, meal);
+      if (dup.event || dup.serverSays) {
+        setServeMsg(`${person.name} was already served ${MEAL_LABEL[meal].toLowerCase()} today — record a second plate on paper.`);
+        return;
+      }
+
+      const loc = getCachedLocation();
+      const tokenNumber = await nextTokenNumber(siteCode, localDate(), meal);
+      const event = await recordEvent({
+        personId: person.id,
+        personKind: person.kind,
+        personName: person.name,
+        empCode: person.empCode,
+        type: "meal",
+        meal,
+        method: "manual",
+        matchScore: null,
+        state,
+        extraPlateKind: null,
+        outsideWindow,
+        tokenNumber,
+        latitude: loc?.latitude ?? null,
+        longitude: loc?.longitude ?? null,
+        accuracy: loc?.accuracy ?? null,
+      });
+      setServeDone(event);
+      syncSoon();
+      refresh();
+    } catch (err: any) {
+      setServeMsg(err?.message ?? "Could not record the plate");
+    } finally {
+      setServeBusy(false);
+    }
+  }
+
   if (!person) return null;
 
   const punches = events.filter((e) => e.type === "in" || e.type === "out");
   const plates = events.filter((e) => e.type === "meal");
+  const { meal, outsideWindow } = currentMeal(new Date(), windows);
 
   return (
     <div className="min-h-screen bg-bg pb-24">
@@ -127,20 +214,28 @@ export default function PersonDetailPage({
             {person.aadhar ? ` · Aadhar ${person.aadhar}` : ""}
           </p>
         </div>
-        {role === "gate" && onEdit && (
-          <button onClick={onEdit} className="btn-outline px-3 py-2 text-sm">
-            Edit
-          </button>
-        )}
       </div>
+
+      {/* Serve meal — canteen only. */}
+      {role === "canteen" && (
+        <div className="px-4 flex gap-2 items-center">
+          <button onClick={handleServe} disabled={serveBusy} className="btn-primary flex-1 py-2.5 text-sm">
+            {serveBusy ? "Serving…" : `Serve ${MEAL_LABEL[meal]}`}
+          </button>
+          {outsideWindow && (
+            <span className="badge bg-amber-100 text-amber-800 shrink-0">Outside window</span>
+          )}
+        </div>
+      )}
+      {serveMsg && <p className="px-4 mt-2 text-[13px] text-red-600">{serveMsg}</p>}
 
       {/* Manual punch — gate only. */}
       {role === "gate" && (
         <div className="px-4 flex gap-2">
-          <button onClick={() => { setManualError(null); setManualSetup("in"); }} className="btn-outline flex-1 py-2.5 text-sm">
+          <button onClick={() => { setManualError(null); setBackTs(nowForDateTimeInput()); setManualSetup("in"); }} className="btn-outline flex-1 py-2.5 text-sm">
             <IconPlus size={15} /> Manual in
           </button>
-          <button onClick={() => { setManualError(null); setManualSetup("out"); }} className="btn-outline flex-1 py-2.5 text-sm">
+          <button onClick={() => { setManualError(null); setBackTs(nowForDateTimeInput()); setManualSetup("out"); }} className="btn-outline flex-1 py-2.5 text-sm">
             <IconPlus size={15} /> Manual out
           </button>
           {person.kind === "wage" && (
@@ -156,9 +251,10 @@ export default function PersonDetailPage({
         </div>
       )}
 
-      {/* Teach this phone a face the camera keeps missing. Gate only, and
-          local to this device — the office never sees these samples. */}
-      {role === "gate" && (
+      {/* Teach this phone a face the camera keeps missing. Any paired role —
+          canteen misses matches too — and local to this device; the office
+          never sees these samples. */}
+      {(role === "gate" || role === "canteen") && (
         <div className="px-4 mt-2">
           <div className="flex gap-2">
             <button onClick={() => { setFaceMsg(null); setFaceHelp(true); }} className="btn-outline flex-1 py-2.5 text-sm">
@@ -271,7 +367,7 @@ export default function PersonDetailPage({
                 disabled={manualBusy}
                 onChange={(e) => setBackTs(e.target.value)}
               />
-              <span className="text-[11px] text-ink-muted">Leave empty for right now.</span>
+              <span className="text-[11px] text-ink-muted">Today by default — change only to backdate.</span>
             </label>
             {manualError && <p className="text-sm text-red-600 mb-3">{manualError}</p>}
             <div className="flex gap-2">
@@ -296,6 +392,39 @@ export default function PersonDetailPage({
           </div>
         </div>
       )}
+
+      {/* Served token (canteen) — mirror of the camera's token screen. */}
+      {serveDone && (
+        <div className="fixed inset-0 z-50 bg-primary flex flex-col items-center justify-center gap-5 p-6 pb-24 text-white">
+          <p className="text-sm font-medium text-white/70 uppercase tracking-widest">Token</p>
+          <div className="bg-white text-ink rounded-3xl px-10 py-8 text-center shadow-float w-full max-w-sm">
+            <p className="text-4xl font-black tracking-tight">{serveDone.tokenNumber}</p>
+            <p className="mt-1 text-sm text-ink-muted">
+              {serveDone.meal ? MEAL_LABEL[serveDone.meal] : ""} · {formatTime(serveDone.ts)}
+            </p>
+          </div>
+          <p className="text-xl font-semibold">{serveDone.personName}</p>
+          <div className="flex items-center gap-2">
+            <span className={`badge ${STATE_BADGE[serveDone.state]}`}>{STATE_LABEL[serveDone.state]}</span>
+            {serveDone.outsideWindow && <span className="badge bg-white/15 text-white">Outside window</span>}
+          </div>
+          <button
+            onClick={() => setServeDone(null)}
+            className="btn bg-white text-primary w-full max-w-sm py-3.5 font-semibold"
+          >
+            <IconCheck size={20} /> Done
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+/** "now" formatted for a datetime-local input (YYYY-MM-DDTHH:mm) — the
+ * manual punch sheet defaults to today so an operator only changes it to
+ * backdate a punch. */
+function nowForDateTimeInput(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

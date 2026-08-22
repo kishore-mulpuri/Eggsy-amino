@@ -117,7 +117,7 @@ function vibrate() {
   }
 }
 
-export default function CameraPage({ active }: { active: boolean }) {
+export default function CameraPage({ active, onOpenPerson }: { active: boolean; onOpenPerson: (id: string) => void }) {
   const [configured, setConfigured] = useState(false);
   const [role, setRole] = useState<Role | null>(null);
   const [deviceName, setDeviceName] = useState<string | null>(null);
@@ -689,13 +689,11 @@ export default function CameraPage({ active }: { active: boolean }) {
 
   function handleSearchPick(person: Person) {
     setShowSearch(false);
-    if (role === "gate") {
-      // Name-pick at the gate: a routine fallback, not a history correction
-      // (UNIFIED-04 §5) — no PIN, recorded with method "manual".
-      handleGateMatch(person, null, false);
-    } else {
-      setMatch({ person, matchedByFace: false, score: null });
-    }
+    // Name-pick at gate or canteen opens the person's detail page — the
+    // operator fixes a missed face there ("Improve face match") and then
+    // punches (gate) or serves (canteen) from that same page, instead of the
+    // quick punch/serve card getting in the way (UNIFIED-04 §5).
+    onOpenPerson(person.id);
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
