@@ -147,3 +147,11 @@ export const IconBack = makeIcon(
     <path d="m15 18-6-6 6-6" />
   </>,
 );
+
+export const IconCameraSwitch = makeIcon(
+  <>
+    <path d="M9 3h6l1.5 2H21a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4.5L9 3Z" />
+    <path d="M16 12a4 4 0 0 1-6.5 3.1M8 12a4 4 0 0 1 6.5-3.1" />
+    <path d="m9.5 8 -1.5 1 1.5 1M14.5 16l1.5-1-1.5-1" />
+  </>,
+);

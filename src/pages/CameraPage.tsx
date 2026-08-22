@@ -39,7 +39,7 @@ import { localDate } from "../lib/id";
 import { MEAL_LABEL, STATE_LABEL, STATE_BADGE, formatTime } from "../lib/labels";
 import type { Event, EventState, Meal, MealWindow, Person, Role } from "../types";
 import AuthorizeSheet, { type AuthorizeData } from "../components/AuthorizeSheet";
-import { IconSearch, IconWifiOff, IconCamera, IconCheck, IconRefresh } from "../components/Icons";
+import { IconSearch, IconWifiOff, IconCamera, IconCheck, IconRefresh, IconCameraSwitch } from "../components/Icons";
 
 const STATE_PULL_MAX_AGE_MS = 15 * 60_000; // UNIFIED-00 §8 — stop guessing after 15 min
 
@@ -129,6 +129,7 @@ export default function CameraPage({ active }: { active: boolean }) {
   const [engineReady, setEngineReady] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
 
   const [match, setMatch] = useState<MatchInfo | null>(null);
   const [lastSeen, setLastSeen] = useState<{ score: number } | null>(null);
@@ -260,23 +261,20 @@ export default function CameraPage({ active }: { active: boolean }) {
   // pulls may only run while no camera is held, and this tab is the camera.
   const cameraPaused = !!plan?.needsPhoto;
   const cameraActive = !!configured && !!role && active && !cameraPaused;
+
+  // Face engine: loaded once per activation, independent of which camera
+  // (front/back) is streaming — switching cameras must not reload the model.
   useEffect(() => {
     if (!cameraActive) {
-      cameraReadyRef.current = false;
       engineReadyRef.current = false;
-      setCameraReady(false);
       setEngineReady(false);
       // Free the face engine too — a 2GB phone shouldn't hold the WebGL
       // context + tensors while it's not even on the camera.
       disposeFaceEngine();
-      return () => {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      };
+      return;
     }
 
     let cancelled = false;
-
     loadFaceEngine()
       .then(() => {
         if (cancelled) return;
@@ -285,9 +283,29 @@ export default function CameraPage({ active }: { active: boolean }) {
       })
       .catch((err) => !cancelled && setCameraError(`Could not load face engine: ${err.message}`));
 
+    return () => {
+      cancelled = true;
+      disposeFaceEngine();
+    };
+  }, [cameraActive]);
+
+  // Camera stream: re-opened whenever facingMode flips (front/back switch).
+  useEffect(() => {
+    if (!cameraActive) {
+      cameraReadyRef.current = false;
+      setCameraReady(false);
+      return () => {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      };
+    }
+
+    let cancelled = false;
+    setCameraReady(false);
+    cameraReadyRef.current = false;
     navigator.mediaDevices
       .getUserMedia({
-        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
       })
       .then((stream) => {
@@ -309,9 +327,8 @@ export default function CameraPage({ active }: { active: boolean }) {
       cancelled = true;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
-      disposeFaceEngine();
     };
-  }, [cameraActive]);
+  }, [cameraActive, facingMode]);
 
   /** Grab the current video frame into an offscreen canvas. The canvas — not
    * the live <video> — is what gets scanned, so the face we analyse is
@@ -795,6 +812,16 @@ export default function CameraPage({ active }: { active: boolean }) {
             <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-white text-sm text-center px-6">
               {cameraError}
             </div>
+          )}
+
+          {!match && !punchPlan && !outcome && (
+            <button
+              onClick={() => setFacingMode((m) => (m === "user" ? "environment" : "user"))}
+              aria-label="Switch camera"
+              className="absolute top-2 right-2 z-10 bg-black/50 text-white p-2 rounded-full"
+            >
+              <IconCameraSwitch size={18} />
+            </button>
           )}
 
           {/* Scanning overlay */}

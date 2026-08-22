@@ -3,7 +3,7 @@ import { listPeople, getThumbKeys, fetchThumb, getPersonThumb } from "../lib/peo
 import { listExceptions, lastPunchToday, stateIsFreshForToday } from "../lib/events";
 import { pendingCounts, getDeviceIdentity } from "../lib/sync";
 import { MEAL_LABEL, STATE_LABEL, STATE_BADGE, formatDate, formatTime } from "../lib/labels";
-import { IconAlert, IconPlus } from "../components/Icons";
+import { IconAlert, IconPlus, IconSearch } from "../components/Icons";
 import type { Event, Person, Role } from "../types";
 
 /** The roster. PIN-gated. Gate enrols wage workers; canteen is read-only —
@@ -17,6 +17,7 @@ export default function PeoplePage({
   onEnrol: () => void;
 }) {
   const [tab, setTab] = useState<"roster" | "exceptions">("roster");
+  const [query, setQuery] = useState("");
   const [people, setPeople] = useState<Person[]>([]);
   const [exceptions, setExceptions] = useState<Event[]>([]);
   const [pending, setPending] = useState(0);
@@ -123,12 +124,27 @@ export default function PeoplePage({
 
       {tab === "roster" ? (
         <div className="px-4 mt-3 space-y-2">
+          {people.length > 0 && (
+            <div className="relative">
+              <IconSearch size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted" />
+              <input
+                className="input pl-9"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search name or code…"
+              />
+            </div>
+          )}
           {people.length === 0 && (
             <p className="text-center text-sm text-ink-muted py-10">
               No people yet. {role === "gate" ? "Enrol the first one, or pair this phone to pull the roster." : "Sync in Settings to pull the roster."}
             </p>
           )}
-          {people.map((p) => (
+          {people.length > 0 &&
+            filterPeople(people, query).length === 0 && (
+              <p className="text-center text-sm text-ink-muted py-10">No one matches "{query}".</p>
+            )}
+          {filterPeople(people, query).map((p) => (
             <button
               key={p.id}
               onClick={() => onOpenPerson(p.id)}
@@ -201,6 +217,14 @@ export default function PeoplePage({
         </div>
       )}
     </div>
+  );
+}
+
+function filterPeople(people: Person[], query: string): Person[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return people;
+  return people.filter(
+    (p) => p.name.toLowerCase().includes(q) || (p.empCode ?? "").toLowerCase().includes(q),
   );
 }
 
