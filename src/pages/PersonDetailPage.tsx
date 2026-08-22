@@ -4,12 +4,11 @@ import { listEventsForPerson, recordEvent } from "../lib/events";
 import { getDeviceIdentity, syncSoon } from "../lib/sync";
 import { getCachedLocation } from "../lib/location";
 import { MEAL_LABEL, STATE_LABEL, STATE_BADGE, formatDate, formatTime } from "../lib/labels";
-import AuthorizeSheet, { type AuthorizeData } from "../components/AuthorizeSheet";
 import { IconBack, IconPlus } from "../components/Icons";
 import type { Event, Person } from "../types";
 
 /** One person's history: punch history and their exceptions list both live
- * here. Gate role + canAuthorise PIN → manual punch, now or backdated
+ * here. Gate role → manual punch, now or backdated
  * (backdating is the day-correction mechanism, UNIFIED-02 §7). */
 export default function PersonDetailPage({
   personId,
@@ -24,7 +23,8 @@ export default function PersonDetailPage({
   const [events, setEvents] = useState<Event[]>([]);
   const [role, setRole] = useState<string | null>(null);
   const [manualSetup, setManualSetup] = useState<"in" | "out" | null>(null);
-  const [manualSheet, setManualSheet] = useState<{ type: "in" | "out"; ts: number } | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
   const [backTs, setBackTs] = useState("");
 
   useEffect(() => {
@@ -38,32 +38,37 @@ export default function PersonDetailPage({
     setEvents(evs);
   }
 
-  async function handleManualPunch(data: AuthorizeData) {
-    const person_ = person;
-    const sheet = manualSheet;
-    if (!person_ || !sheet) return;
-    const loc = getCachedLocation();
-    await recordEvent({
-      personId: person_.id,
-      personKind: person_.kind,
-      personName: person_.name,
-      empCode: person_.empCode,
-      type: sheet.type,
-      method: "manual",
-      state: "verified",
-      authorisedBy: data.authoriser.id,
-      reasonCode: data.reasonCode,
-      reasonText: data.reasonText,
-      ts: sheet.ts,
-      latitude: loc?.latitude ?? null,
-      longitude: loc?.longitude ?? null,
-      accuracy: loc?.accuracy ?? null,
-    });
-    setManualSheet(null);
-    setManualSetup(null);
-    setBackTs("");
-    syncSoon();
-    refresh();
+  async function handleManualPunch(type: "in" | "out", ts: number) {
+    if (manualBusy || !person) return;
+    try {
+      setManualBusy(true);
+      setManualError(null);
+      const loc = getCachedLocation();
+      await recordEvent({
+        personId: person.id,
+        personKind: person.kind,
+        personName: person.name,
+        empCode: person.empCode,
+        type,
+        method: "manual",
+        state: "verified",
+        ts,
+        latitude: loc?.latitude ?? null,
+        longitude: loc?.longitude ?? null,
+        accuracy: loc?.accuracy ?? null,
+      });
+      setManualSetup(null);
+      setBackTs("");
+      syncSoon();
+      refresh();
+    } catch (err: any) {
+      // The punch was NOT written — say so and keep the sheet open with the
+      // entered time, so the operator can retry rather than walk away
+      // assuming it saved.
+      setManualError(err?.message ?? "Could not record punch");
+    } finally {
+      setManualBusy(false);
+    }
   }
 
   if (!person) return null;
@@ -92,13 +97,13 @@ export default function PersonDetailPage({
         )}
       </div>
 
-      {/* Manual punch — gate only; authorise to change history. */}
+      {/* Manual punch — gate only. */}
       {role === "gate" && (
         <div className="px-4 flex gap-2">
-          <button onClick={() => setManualSetup("in")} className="btn-outline flex-1 py-2.5 text-sm">
+          <button onClick={() => { setManualError(null); setManualSetup("in"); }} className="btn-outline flex-1 py-2.5 text-sm">
             <IconPlus size={15} /> Manual in
           </button>
-          <button onClick={() => setManualSetup("out")} className="btn-outline flex-1 py-2.5 text-sm">
+          <button onClick={() => { setManualError(null); setManualSetup("out"); }} className="btn-outline flex-1 py-2.5 text-sm">
             <IconPlus size={15} /> Manual out
           </button>
           {person.kind === "wage" && (
@@ -168,7 +173,7 @@ export default function PersonDetailPage({
         </div>
       </div>
 
-      {/* Manual punch setup: now or backdated, then the authorisation sheet. */}
+      {/* Manual punch setup: now or backdated. */}
       {manualSetup && (
         <div className="fixed inset-0 z-40 bg-black/50 flex items-end sm:items-center sm:justify-center">
           <div className="bg-bg w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl shadow-float p-5">
@@ -176,7 +181,7 @@ export default function PersonDetailPage({
               Manual {manualSetup.toUpperCase()} — {person.name}
             </h2>
             <p className="text-[13px] text-ink-muted mb-4">
-              A backdated punch is the day correction. Either way this records who authorised it.
+              A backdated punch is the day correction.
             </p>
             <label className="block mb-4">
               <span className="label">When did this happen?</span>
@@ -184,37 +189,33 @@ export default function PersonDetailPage({
                 className="input"
                 type="datetime-local"
                 value={backTs}
+                disabled={manualBusy}
                 onChange={(e) => setBackTs(e.target.value)}
               />
               <span className="text-[11px] text-ink-muted">Leave empty for right now.</span>
             </label>
+            {manualError && <p className="text-sm text-red-600 mb-3">{manualError}</p>}
             <div className="flex gap-2">
-              <button onClick={() => { setManualSetup(null); setBackTs(""); }} className="btn-outline flex-1 py-3">
+              <button
+                onClick={() => { setManualSetup(null); setBackTs(""); setManualError(null); }}
+                disabled={manualBusy}
+                className="btn-outline flex-1 py-3"
+              >
                 Cancel
               </button>
               <button
+                disabled={manualBusy}
                 onClick={() => {
                   const ts = backTs && Number.isFinite(new Date(backTs).getTime()) ? new Date(backTs).getTime() : Date.now();
-                  setManualSheet({ type: manualSetup, ts });
-                  setManualSetup(null);
+                  handleManualPunch(manualSetup, ts);
                 }}
                 className="btn-primary flex-1 py-3"
               >
-                Continue
+                {manualBusy ? "Recording..." : "Record punch"}
               </button>
             </div>
           </div>
         </div>
-      )}
-
-      {manualSheet && (
-        <AuthorizeSheet
-          title={`Authorise manual ${manualSheet.type.toUpperCase()}`}
-          subtitle={`${person.name} · ${manualSheet.ts !== Date.now() ? "backdated" : "now"} — this changes history, so it records who authorised it.`}
-          confirmLabel="Record punch"
-          onCancel={() => { setManualSheet(null); setBackTs(""); }}
-          onSubmit={handleManualPunch}
-        />
       )}
     </div>
   );
